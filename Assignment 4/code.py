@@ -1,326 +1,287 @@
 """
-Assignment 10: Text-to-Image Generation using Transformer-based Models
-======================================================================
-Exploring Transformer capabilities in multimodal tasks by generating
-images from text prompts using Cloudflare Workers AI API.
-
-Model: @cf/black-forest-labs/flux-1-schnell
+Assignment 4: Question-Answering Chatbot using Pre-trained Language Model
+=========================================================================
+Build a simple QA chatbot using Google Gemini (pre-trained LLM).
+Demonstrates:
+  1. Basic question answering
+  2. Context-based QA (reading comprehension)
+  3. Multi-turn conversation
+  4. Domain-specific QA
 """
 
-import requests
 import os
+import sys
 import json
-import base64
+import time
 from datetime import datetime
 from dotenv import load_dotenv
-from PIL import Image
-import io
-import numpy as np
-import matplotlib.pyplot as plt
 
-# ─── Configuration ───────────────────────────────────────────────────────────
+# --- Configuration -----------------------------------------------------------
 
-# Load .env from the same directory as this script
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(SCRIPT_DIR, ".env"))
 
-API_KEY = os.getenv("API_KEY", "").strip()
-ACCOUNT_ID = os.getenv("ACCOUNT_ID", "").strip()
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "").strip()
 
-MODEL = "@cf/black-forest-labs/flux-1-schnell"
-BASE_URL = f"https://api.cloudflare.com/client/v4/accounts/{ACCOUNT_ID}/ai/run/{MODEL}"
-
-HEADERS = {
-    "Authorization": f"Bearer {API_KEY}",
-    "Content-Type": "application/json"
-}
-
-# Output folder inside Assignment10
 OUTPUT_DIR = os.path.join(SCRIPT_DIR, "output")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 
-# ─── Text Prompts ────────────────────────────────────────────────────────────
+# --- Gemini Helper -----------------------------------------------------------
 
-PROMPTS = [
-    {
-        "prompt": "A futuristic city skyline at sunset with flying cars and neon lights",
-        "label": "futuristic_city"
-    },
-    {
-        "prompt": "A serene Japanese garden with cherry blossom trees and a koi pond, watercolor style",
-        "label": "japanese_garden"
-    },
-    {
-        "prompt": "An astronaut riding a horse on the surface of Mars, digital art",
-        "label": "astronaut_mars"
-    },
-    {
-        "prompt": "A steampunk mechanical owl perched on an old book, highly detailed",
-        "label": "steampunk_owl"
-    },
-    {
-        "prompt": "A cozy cabin in a snowy mountain landscape during golden hour, photorealistic",
-        "label": "snowy_cabin"
-    },
-]
+def call_gemini(prompt, label=""):
+    """Send a prompt to Gemini and return the response text."""
+    import google.generativeai as genai
 
+    genai.configure(api_key=GOOGLE_API_KEY)
+    model = genai.GenerativeModel("gemini-2.5-flash")
 
-# ─── Helper Functions ────────────────────────────────────────────────────────
+    print(f"\n{'='*70}")
+    print(f"  {label}")
+    print(f"{'='*70}")
+    print(f"\nPrompt:\n{prompt}\n")
 
-def generate_image(prompt: str) -> bytes | None:
-    """Send a text prompt to Cloudflare Workers AI (FLUX.1-schnell) and return image bytes."""
-    payload = {
-        "prompt": prompt,
-        "steps": 8   # max allowed for this model, higher = better quality
-    }
-    try:
-        print(f"  -> Sending request to Cloudflare Workers AI...")
-        response = requests.post(BASE_URL, headers=HEADERS, json=payload, timeout=120)
-
-        if response.status_code == 200:
-            content_type = response.headers.get("content-type", "")
-
-            # The API returns JSON with base64-encoded image in result.image
-            if "application/json" in content_type or "json" in content_type:
-                data = response.json()
-                if data.get("success") and data.get("result", {}).get("image"):
-                    img_b64 = data["result"]["image"]
-                    img_bytes = base64.b64decode(img_b64)
-                    print(f"  [OK] Image received ({len(img_bytes)} bytes)")
-                    return img_bytes
-                else:
-                    print(f"  [FAIL] Unexpected JSON: {json.dumps(data, indent=2)[:400]}")
-            elif "image" in content_type:
-                # Direct binary image response
-                print(f"  [OK] Image received ({len(response.content)} bytes)")
-                return response.content
+    for attempt in range(3):
+        try:
+            start = time.time()
+            response = model.generate_content(prompt)
+            elapsed = round(time.time() - start, 2)
+            text = response.text
+            print(f"Response ({elapsed}s):\n{text}")
+            return {"prompt": prompt, "response": text, "time_sec": elapsed, "label": label}
+        except Exception as e:
+            if "429" in str(e) and attempt < 2:
+                wait = 30 * (attempt + 1)
+                print(f"  Rate limited. Waiting {wait}s...")
+                time.sleep(wait)
             else:
-                # Try parsing as JSON anyway
-                try:
-                    data = response.json()
-                    if data.get("result", {}).get("image"):
-                        img_bytes = base64.b64decode(data["result"]["image"])
-                        print(f"  [OK] Image decoded ({len(img_bytes)} bytes)")
-                        return img_bytes
-                except Exception:
-                    pass
-                print(f"  [FAIL] Unknown content-type: {content_type}")
-                print(f"         Response: {response.text[:300]}")
-        else:
-            error_msg = response.text[:500]
-            print(f"  [FAIL] HTTP {response.status_code}: {error_msg}")
-            if response.status_code == 401:
-                print("  [!] Authentication failed - API_KEY is invalid or expired")
-                print("      Generate new token: https://dash.cloudflare.com/profile/api-tokens")
-            elif response.status_code == 403:
-                print("  [!] Forbidden - your API token may lack Workers AI permissions")
-            elif response.status_code == 404:
-                print("  [!] Not found - ACCOUNT_ID is likely incorrect")
-
-    except requests.exceptions.Timeout:
-        print("  [FAIL] Request timed out (120s)")
-    except requests.exceptions.ConnectionError:
-        print("  [FAIL] Connection error - check internet connectivity")
-    except Exception as e:
-        print(f"  [FAIL] Exception: {e}")
-
-    return None
+                raise
 
 
-def save_image(image_bytes: bytes, label: str) -> str:
-    """Save raw image bytes to a PNG file."""
-    filepath = os.path.join(OUTPUT_DIR, f"{label}.png")
-    try:
-        img = Image.open(io.BytesIO(image_bytes))
-        img.save(filepath, "PNG")
-    except Exception:
-        with open(filepath, "wb") as f:
-            f.write(image_bytes)
-    print(f"  -> Saved: {filepath}")
-    return filepath
+# =============================================================================
+# PART 1: Basic Question Answering
+# =============================================================================
+# The chatbot answers general knowledge questions directly.
 
-
-def create_summary_grid(results: list):
-    """Create a grid visualization of all generated images."""
-    successful = [r for r in results if r["status"] == "success"]
-    if not successful:
-        print("\nNo images to display in grid.")
-        return
-
-    n = len(successful)
-    cols = min(3, n)
-    rows = (n + cols - 1) // cols
-
-    fig, axes = plt.subplots(rows, cols, figsize=(6 * cols, 6 * rows))
-    if rows == 1 and cols == 1:
-        axes = np.array([axes])
-    axes = np.array(axes).flatten()
-
-    for i, result in enumerate(successful):
-        img = Image.open(result["filepath"])
-        axes[i].imshow(img)
-        title = result["prompt"][:60] + ("..." if len(result["prompt"]) > 60 else "")
-        axes[i].set_title(title, fontsize=10, fontweight="bold", wrap=True)
-        axes[i].axis("off")
-
-    for j in range(len(successful), len(axes)):
-        axes[j].axis("off")
-
-    plt.suptitle("Text-to-Image Generation Results\n(FLUX.1-schnell via Cloudflare Workers AI)",
-                 fontsize=16, fontweight="bold", y=1.02)
-    plt.tight_layout()
-    grid_path = os.path.join(OUTPUT_DIR, "summary_grid.png")
-    plt.savefig(grid_path, dpi=150, bbox_inches="tight")
-    plt.show()
-    print(f"\n[OK] Summary grid saved: {grid_path}")
-
-
-def generate_report(results: list):
-    """Generate a comprehensive text report."""
-    report_lines = [
-        "=" * 70,
-        "  TEXT-TO-IMAGE GENERATION REPORT",
-        "  Transformer Capabilities in Multimodal Tasks",
-        "=" * 70,
-        f"\n  Date       : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-        f"  Model      : {MODEL}",
-        f"  API        : Cloudflare Workers AI",
-        f"  Prompts    : {len(results)}",
-        f"  Successful : {sum(1 for r in results if r['status'] == 'success')}",
-        f"  Failed     : {sum(1 for r in results if r['status'] == 'failed')}",
-        "\n" + "-" * 70,
-        "  RESULTS",
-        "-" * 70,
+def basic_qa():
+    questions = [
+        "What is machine learning?",
+        "Explain the difference between supervised and unsupervised learning.",
+        "What are the main components of a neural network?",
     ]
 
-    for i, r in enumerate(results, 1):
-        report_lines.append(f"\n  [{i}] {r['label']}")
-        report_lines.append(f"      Prompt : {r['prompt']}")
-        report_lines.append(f"      Status : {r['status'].upper()}")
-        if r["status"] == "success":
-            report_lines.append(f"      File   : {r['filepath']}")
+    results = []
+    for i, q in enumerate(questions, 1):
+        result = call_gemini(
+            f"Answer the following question concisely in 2-3 sentences.\n\nQuestion: {q}\n\nAnswer:",
+            f"PART 1 - Basic QA [{i}/{len(questions)}]"
+        )
+        results.append(result)
+    return results
 
-    report_lines += [
-        "\n" + "-" * 70,
-        "  HOW TRANSFORMERS ENABLE TEXT-TO-IMAGE GENERATION",
-        "-" * 70,
-        """
-  FLUX.1-schnell uses a Transformer-based architecture for image generation:
 
-  1. TEXT ENCODING (T5 / CLIP Transformer):
-     - The text prompt is tokenized and passed through text encoders
-     - Self-attention layers capture semantic relationships between words
-     - Output: a rich embedding vector representing the prompt meaning
+# =============================================================================
+# PART 2: Context-Based QA (Reading Comprehension)
+# =============================================================================
+# Given a passage, the chatbot answers questions based on it.
 
-  2. FLOW MATCHING (Rectified Flow Transformer):
-     - Unlike traditional diffusion, FLUX uses rectified flow matching
-     - A Transformer predicts the velocity field that maps noise to images
-     - Cross-attention layers condition image generation on text embeddings
-     - This enables faster generation with fewer steps (4-8 steps)
+CONTEXT_PASSAGE = """
+Artificial Intelligence (AI) has transformed numerous industries since its inception.
+In healthcare, AI algorithms can analyse medical images to detect diseases like cancer
+at early stages with accuracy rivalling human doctors. In finance, AI-powered trading
+systems process millions of data points per second to make investment decisions.
+The transportation sector has seen the rise of autonomous vehicles, which use a
+combination of computer vision, sensor fusion, and deep learning to navigate roads.
+In education, AI tutors provide personalised learning experiences, adapting to each
+student's pace and learning style. However, the rapid advancement of AI has also
+raised ethical concerns about job displacement, privacy, and algorithmic bias.
+Researchers and policymakers are working together to establish guidelines that
+ensure AI development benefits humanity while minimising potential harms.
+""".strip()
 
-  3. MULTIMODAL BRIDGE:
-     - Cross-attention layers allow image features to attend to text tokens
-     - The model learns alignment between visual and textual concepts
-     - This is the core mechanism enabling text -> image translation
 
-  4. TRANSFORMER COMPONENTS USED:
-     * Multi-Head Self-Attention  - captures relationships within each modality
-     * Cross-Attention            - bridges text and image modalities
-     * Positional Encoding        - maintains spatial (2D) and sequential structure
-     * Layer Normalization        - stabilizes deep network training
-     * Feed-Forward Networks      - non-linear transformations between layers
+def context_based_qa():
+    questions = [
+        "How is AI used in healthcare according to the passage?",
+        "What ethical concerns are mentioned about AI?",
+    ]
 
-  5. MULTIMODAL CAPABILITIES:
-     - Transformers enable cross-modal understanding (text <-> image)
-     - Attention allows fine-grained control (style, objects, scene, composition)
-     - Pre-trained on large-scale text-image datasets
-     - FLUX.1-schnell is optimized for speed while maintaining quality
-""",
+    results = []
+    for i, q in enumerate(questions, 1):
+        prompt = (
+            f"Read the following passage and answer the question based ONLY on the information provided.\n\n"
+            f"Passage:\n{CONTEXT_PASSAGE}\n\n"
+            f"Question: {q}\n\n"
+            f"Answer:"
+        )
+        result = call_gemini(prompt, f"PART 2 - Context-Based QA [{i}/{len(questions)}]")
+        results.append(result)
+    return results
+
+
+# =============================================================================
+# PART 3: Multi-Turn Conversation
+# =============================================================================
+# Simulates a conversation where context is maintained across turns.
+
+def multi_turn_conversation():
+    conversation_turns = [
+        "What is Python programming language?",
+        "What are its main advantages?",
+        "How is it different from Java?",
+    ]
+
+    history = []
+    results = []
+
+    for i, user_msg in enumerate(conversation_turns, 1):
+        # Build conversation context from history
+        conv_context = ""
+        for turn in history:
+            conv_context += f"User: {turn['user']}\nAssistant: {turn['assistant']}\n\n"
+
+        prompt = (
+            f"You are a helpful QA chatbot. Continue the conversation naturally.\n\n"
+            f"{conv_context}"
+            f"User: {user_msg}\nAssistant:"
+        )
+
+        result = call_gemini(prompt, f"PART 3 - Multi-Turn [{i}/{len(conversation_turns)}]")
+        results.append(result)
+
+        history.append({"user": user_msg, "assistant": result["response"][:300]})
+
+    return results
+
+
+# =============================================================================
+# PART 4: Domain-Specific QA (Science)
+# =============================================================================
+# The chatbot is given a specific role/domain to answer within.
+
+def domain_specific_qa():
+    questions = [
+        "Why is the sky blue?",
+        "How do vaccines work?",
+    ]
+
+    results = []
+    for i, q in enumerate(questions, 1):
+        prompt = (
+            "You are a science teacher explaining concepts to a high school student. "
+            "Give clear, accurate answers with simple examples.\n\n"
+            f"Student's question: {q}\n\n"
+            f"Teacher's answer:"
+        )
+        result = call_gemini(prompt, f"PART 4 - Domain-Specific QA [{i}/{len(questions)}]")
+        results.append(result)
+    return results
+
+
+# =============================================================================
+# Report Generation
+# =============================================================================
+
+def generate_report(all_results):
+    lines = [
+        "=" * 70,
+        "  ASSIGNMENT 4 - QA CHATBOT USING PRE-TRAINED LANGUAGE MODEL",
+        "  Comprehensive Report",
+        "=" * 70,
+        f"\n  Date  : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        f"  Model : gemini-2.5-flash",
+        f"  Total Questions : {len(all_results)}",
+        "",
+    ]
+
+    for r in all_results:
+        lines.append("-" * 70)
+        lines.append(f"  {r['label']}")
+        lines.append("-" * 70)
+        lines.append(f"\n  [Prompt]\n{r['prompt']}\n")
+        lines.append(f"  [Response] ({r['time_sec']}s)\n{r['response']}\n")
+
+    lines += [
+        "=" * 70,
+        "  ANALYSIS",
+        "=" * 70,
+        "",
+        "  Part 1 (Basic QA):",
+        "    The model answers general questions accurately and concisely.",
+        "    Pre-trained knowledge covers a wide range of topics.",
+        "",
+        "  Part 2 (Context-Based QA):",
+        "    When given a passage, the model extracts relevant information",
+        "    and answers questions grounded in the provided text.",
+        "",
+        "  Part 3 (Multi-Turn Conversation):",
+        "    By maintaining conversation history in the prompt, the model",
+        "    produces coherent follow-up responses that reference earlier turns.",
+        "",
+        "  Part 4 (Domain-Specific QA):",
+        "    Role prompting (e.g., 'You are a science teacher') effectively",
+        "    adjusts the model's tone and explanation level.",
+        "",
+        "  Key Takeaway:",
+        "    Pre-trained LLMs serve as powerful QA engines out of the box.",
+        "    Performance improves with context, conversation history, and",
+        "    role-based prompting — no fine-tuning required for basic QA.",
+        "",
         "=" * 70,
     ]
 
-    report_text = "\n".join(report_lines)
+    report_text = "\n".join(lines)
     report_path = os.path.join(OUTPUT_DIR, "generation_report.txt")
     with open(report_path, "w", encoding="utf-8") as f:
         f.write(report_text)
-
-    print(report_text)
-    print(f"\n[OK] Report saved: {report_path}")
+    print(f"\n  Report saved: {report_path}")
 
 
-# ─── Main Execution ──────────────────────────────────────────────────────────
+# =============================================================================
+# Main
+# =============================================================================
 
 def main():
-    print("=" * 60)
-    print("  TEXT-TO-IMAGE GENERATION WITH TRANSFORMERS")
-    print("  Using Cloudflare Workers AI - FLUX.1-schnell")
-    print("=" * 60)
+    print("=" * 70)
+    print("  ASSIGNMENT 4 - QA CHATBOT USING PRE-TRAINED LANGUAGE MODEL")
+    print("  Basic QA | Context QA | Multi-Turn | Domain-Specific")
+    print("=" * 70)
 
-    # Validate config
-    if not API_KEY:
-        print("\n[ERROR] API_KEY not found in .env file")
-        print("  Add to .env:  API_KEY=your_cloudflare_api_token")
+    if not GOOGLE_API_KEY:
+        print("\n[ERROR] GOOGLE_API_KEY not found.")
+        print("  Create a .env file in the Assignment 4 folder with:")
+        print("  GOOGLE_API_KEY=your_key_here")
         return
 
-    if not ACCOUNT_ID:
-        print("\n[ERROR] ACCOUNT_ID not found in .env file")
-        print("  Add to .env:  ACCOUNT_ID=your_cloudflare_account_id")
-        print("")
-        print("  HOW TO FIND YOUR ACCOUNT ID:")
-        print("  1. Go to https://dash.cloudflare.com")
-        print("  2. Click 'Workers & Pages' in the left sidebar")
-        print("  3. Your Account ID is shown on the right side")
-        print("     OR in the URL: https://dash.cloudflare.com/<ACCOUNT_ID>/workers")
-        return
+    print(f"\n  API Key : {GOOGLE_API_KEY[:8]}...{GOOGLE_API_KEY[-4:]}")
+    print(f"  Output  : {OUTPUT_DIR}")
 
-    print(f"\n  API Key    : {API_KEY[:8]}...{API_KEY[-4:]}")
-    print(f"  Account ID : {ACCOUNT_ID[:8]}...{ACCOUNT_ID[-4:]}")
-    print(f"  Model      : {MODEL}")
-    print(f"  Output     : {OUTPUT_DIR}")
+    all_results = []
 
-    results = []
+    # Part 1
+    all_results.extend(basic_qa())
 
-    for i, item in enumerate(PROMPTS, 1):
-        prompt = item["prompt"]
-        label = item["label"]
+    # Part 2
+    all_results.extend(context_based_qa())
 
-        print(f"\n[{i}/{len(PROMPTS)}] Generating: \"{prompt}\"")
+    # Part 3
+    all_results.extend(multi_turn_conversation())
 
-        image_bytes = generate_image(prompt)
+    # Part 4
+    all_results.extend(domain_specific_qa())
 
-        if image_bytes:
-            filepath = save_image(image_bytes, label)
-            results.append({
-                "prompt": prompt,
-                "label": label,
-                "status": "success",
-                "filepath": filepath
-            })
-        else:
-            results.append({
-                "prompt": prompt,
-                "label": label,
-                "status": "failed",
-                "filepath": None
-            })
-
-    # Save results JSON
+    # Save JSON
     results_path = os.path.join(OUTPUT_DIR, "results.json")
     with open(results_path, "w", encoding="utf-8") as f:
-        json.dump(results, f, indent=2)
-    print(f"\n[OK] Results JSON saved: {results_path}")
+        json.dump(all_results, f, indent=2, ensure_ascii=False)
+    print(f"\n  Results JSON saved: {results_path}")
 
     # Generate report
-    generate_report(results)
+    generate_report(all_results)
 
-    # Create image grid if any succeeded
-    try:
-        create_summary_grid(results)
-    except Exception as e:
-        print(f"\n[WARNING] Could not create summary grid: {e}")
-
-    print("\n[OK] Assignment 10 complete.")
+    print("\n" + "=" * 70)
+    print("  ASSIGNMENT 4 COMPLETE")
+    print("=" * 70)
 
 
 if __name__ == "__main__":
