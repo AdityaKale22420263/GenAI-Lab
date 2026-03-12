@@ -5,4 +5,3 @@ __pycache__/
 *.pth
 *.bin
 checkpoint-*/
-fine_tuned_model/
